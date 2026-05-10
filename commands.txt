@@ -1,0 +1,572 @@
+================================================================================
+  androidForge v1.2  —  Complete Command Reference
+  MediaTek BROM Dump, Flash & Device Management Tool
+  Author: GOODxVAMPIRE
+================================================================================
+
+CONTENTS
+  1.  Installation
+  2.  How to enter BROM mode (all platforms)
+  3.  Command syntax overview
+  4.  Information & diagnostic commands   (no writes)
+  5.  Dump commands
+  6.  Flash commands
+  7.  Partition management commands
+  8.  A/B slot commands
+  9.  Reboot commands
+  10. Scatter file commands
+  11. Global flags (work with any command)
+  12. Full examples — real-world workflows
+  13. Troubleshooting
+  14. Supported chipsets summary
+  15. Directory layout
+
+================================================================================
+  1. INSTALLATION
+================================================================================
+
+Required Python: 3.8 or newer
+
+Install dependencies:
+  pip install pyusb pyserial colorama tqdm
+
+Platform extras:
+  Windows  : Install MTK USB drivers from MediaTek, OR use Zadig to bind
+             WinUSB to VID=0x0E8D
+  Linux    : sudo pip install pyusb  OR add a udev rule:
+               echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", MODE="0666"' \
+                 | sudo tee /etc/udev/rules.d/99-mtk.rules
+               sudo udevadm control --reload
+  macOS    : sudo pip install pyusb; run with sudo
+  Termux   : pkg install python libusb; install Termux:USB from F-Droid;
+             grant USB host permission; run with sudo
+
+Verify installation:
+  python androidForge.py --check-deps
+
+================================================================================
+  2. HOW TO ENTER BROM MODE
+================================================================================
+
+BROM (Boot ROM) mode is the lowest-level USB mode on MediaTek devices.
+The tool ONLY works in BROM mode (PID 0x0001 or 0x0003).
+
+--- Standard method (most devices) ---
+  1. Fully power off the device (hold power, select Power Off)
+     Some devices need the battery removed to truly power off.
+  2. Hold the Vol-Down button (some devices use Vol-Up)
+  3. While holding Vol-Down, connect the USB cable to your computer
+  4. The device should appear — DO NOT release Vol-Down until detected
+  5. Run androidForge with the desired command
+
+--- Test Point (TP) method (if Vol-Down doesn't work) ---
+  Some locked devices require shorting a test point on the PCB:
+  1. Open the device, locate the BROM test point (search your model)
+  2. Short TP to GND while connecting USB
+  3. A metal tweezer or wire works; release after detection
+
+--- Verify detection ---
+  Linux/macOS:  lsusb | grep "0e8d"
+  Windows:      Device Manager -> Universal Serial Bus -> MediaTek USB Port
+
+--- You will see this output when BROM is detected ---
+  [OK]  BROM device found!  VID=0x0E8D  PID=0x0003  (BROM)
+
+--- Common wrong modes ---
+  PID=0x2000  Preloader mode — device started booting, power off and retry
+  PID=0x2001  DA mode        — download agent already running, power off
+  PID=0x3000  BROM v2        — accepted, some newer SoCs use this
+
+================================================================================
+  3. COMMAND SYNTAX OVERVIEW
+================================================================================
+
+  python androidForge.py <MODE> [OPTIONS]
+
+  Every mode is a single --flag. All modes are mutually exclusive.
+  Options can be combined with any compatible mode.
+
+  Modes that don't need USB:
+    --check-deps         Check that all Python packages are installed
+    --list-chipsets      Show all supported chipsets and payload status
+
+  Modes that connect but don't upload a payload:
+    --target-config      Read SBC/SLA/DAA security flags from BROM register
+
+  Modes that are fully read-only (connect, read, exit):
+    --list-partitions    Read GPT and print partition table
+    --device-info        Read all hw info, storage, slots, GPT, export JSON
+    --slot-info          Read A/B slot status from misc partition
+    --verify-partition   SHA256 compare partition vs local image
+
+  Modes that write to the device:
+    --dump               Dump default partitions to disk
+    --dump-all           Dump every GPT partition to disk
+    --flash-only         Flash one partition image
+    --batch-flash        Flash all *.img files from a directory
+    --scatter            Parse scatter file; add --scatter-flash to write
+    --format             Zero-fill erase one partition
+    --wipe-userdata      Zero-fill userdata + metadata
+    --switch-slot        Modify boot_ctrl in misc to change active A/B slot
+    --reboot             Send software reboot command via DA
+
+================================================================================
+  4. INFORMATION & DIAGNOSTIC COMMANDS  (safe, no writes)
+================================================================================
+
+--- Check dependencies (no USB needed) ---
+  python androidForge.py --check-deps
+
+  Output: lists pyusb, pyserial, colorama, tqdm — OK or MISSING
+  Fix:    pip install pyusb pyserial colorama tqdm
+
+--- List all supported chipsets (no USB needed) ---
+  python androidForge.py --list-chipsets
+
+  Output: table of all 44 supported chipsets with hw_code, name, storage
+          type, description, and whether the payload binary is present.
+  Use this to check if your chipset is supported before connecting.
+
+--- Read BROM security flags only (connects, no payload) ---
+  python androidForge.py --target-config
+  python androidForge.py --target-config --wait-timeout 120
+
+  Output: SBC / SLA / DAA / KEY flags from hardware register 0xD8.
+  Use this BEFORE trying to flash to know which bypass payload you need:
+    SBC only (no SLA/DAA): standard unsigned payload may work
+    SLA or DAA enabled:    you need a Kamakiri-class signed payload
+
+--- List all partitions on device ---
+  python androidForge.py --list-partitions
+  python androidForge.py --list-partitions --verbose
+
+  Output: GPT partition table — name, first LBA, last LBA, size.
+  Requires: BROM mode + payload binary for your chipset.
+
+--- Full device information ---
+  python androidForge.py --device-info
+  python androidForge.py --device-info --out my_device.json
+
+  Output: hw_code, chipset name, storage type, capacity, security flags,
+          A/B slot status, all partitions — printed to screen and saved
+          as JSON.
+  Default JSON path: logs/device_info_<chipset>_<timestamp>.json
+
+--- A/B slot status ---
+  python androidForge.py --slot-info
+
+  Output: active slot, suffix, per-slot priority / tries / successful boot.
+  Shows N/A if device does not use A/B slots.
+
+--- Verify partition matches local image (read-only) ---
+  python androidForge.py --verify-partition boot --image boot.img
+  python androidForge.py --verify-partition recovery --image recovery.img
+  python androidForge.py --verify-partition vbmeta --image vbmeta.img
+
+  How it works: reads partition from device, SHA256 compares the first
+  len(image) bytes. Does NOT write anything to the device.
+  Returns exit code 0 on match, 1 on mismatch.
+
+================================================================================
+  5. DUMP COMMANDS
+================================================================================
+
+--- Dump default partitions ---
+  python androidForge.py --dump
+
+  Default set: boot, init_boot, vbmeta, recovery, dtbo
+  A/B devices: automatically tries boot_a / boot_b if boot not found.
+  Output: backup/<chipset>/*.img + backup_manifest.json
+
+--- Dump specific partitions ---
+  python androidForge.py --dump --partitions boot,recovery,vbmeta
+  python androidForge.py --dump --partitions system,vendor,product
+
+--- Dump ALL partitions ---
+  python androidForge.py --dump-all
+
+  Dumps every entry in the GPT. Can be large (4–256 GB total).
+  Output: backup/<chipset>/<partition>.img for each
+
+--- Dump then immediately flash a patched image ---
+  python androidForge.py --dump --flash-partition boot --flash-image patched_boot.img
+  python androidForge.py --dump --flash-partition boot --flash-image patched_boot.img --force
+
+  This dumps all default partitions first (for a backup), then flashes.
+  --force skips the "Type YES" confirmation prompt.
+
+================================================================================
+  6. FLASH COMMANDS
+================================================================================
+
+IMPORTANT: Never flash a sparse image directly. Convert first:
+  simg2img system.img system_raw.img
+  python androidForge.py --flash-only --flash-partition system --flash-image system_raw.img
+
+--- Flash one partition (no dump) ---
+  python androidForge.py --flash-only --flash-partition boot --flash-image magisk_boot.img
+  python androidForge.py --flash-only --flash-partition recovery --flash-image twrp.img
+  python androidForge.py --flash-only --flash-partition vbmeta --flash-image vbmeta_disabled.img
+
+--- Flash with --force (skip YES confirmation) ---
+  python androidForge.py --flash-only --flash-partition boot --flash-image boot.img --force
+
+--- Flash all images from a directory ---
+  python androidForge.py --batch-flash ./firmware/
+  python androidForge.py --batch-flash ./firmware/ --force
+
+  File naming: the stem of each .img file must match the partition name.
+    boot.img       -> flashes 'boot'     partition
+    recovery.img   -> flashes 'recovery' partition
+    vbmeta.img     -> flashes 'vbmeta'   partition
+    boot_a.img     -> flashes 'boot_a'   partition (A/B devices)
+
+  Protected partitions (preloader, lk, tee, etc.) are skipped automatically.
+  Any filename not found in GPT is skipped with a warning.
+
+--- Flash with custom payload binary ---
+  python androidForge.py --flash-only --flash-partition boot \
+    --flash-image boot.img --payload ./payloads/my_custom.bin
+
+================================================================================
+  7. PARTITION MANAGEMENT COMMANDS
+================================================================================
+
+--- Format (zero-fill erase) a partition ---
+  python androidForge.py --format cache
+  python androidForge.py --format dtbo
+  python androidForge.py --format cache --force
+
+  Without --force: you must type ERASE to confirm.
+  Protected partitions (preloader, lk, tee, nvram, seccfg, pgpt) are
+  blocked unconditionally — the tool will not erase them.
+
+  Common safe targets:
+    cache      App cache partition
+    dtbo       Device tree blob overlay
+    odm        OEM customisation partition
+    vendor_dlkm Vendor dynamic loadable kernel modules
+
+--- Wipe userdata and metadata ---
+  python androidForge.py --wipe-userdata
+  python androidForge.py --wipe-userdata --force
+
+  Without --force: you must type exactly:  WIPE USERDATA
+  Partitions wiped: userdata, metadata, persist (if present in GPT).
+  Use this to perform a factory reset at the BROM level — bypasses Android.
+
+================================================================================
+  8. A/B SLOT COMMANDS
+================================================================================
+
+--- Show current A/B slot status ---
+  python androidForge.py --slot-info
+
+  Reads boot_ctrl from misc partition. Shows:
+    - Active slot name (a or b)
+    - Current boot suffix (_a, _b)
+    - Per-slot: priority, tries remaining, successful boot flag, verity status
+
+--- Switch active slot ---
+  python androidForge.py --switch-slot a
+  python androidForge.py --switch-slot b
+  python androidForge.py --switch-slot a --force
+
+  Without --force: you must type YES to confirm.
+  Modifies boot_ctrl in misc partition:
+    - Sets target slot priority=15, tries=7, successful=0
+    - Sets other slot priority=0
+    - Updates slot_suffix field
+    - Recomputes CRC32 over first 52 bytes (AOSP-compatible)
+  Reboot the device after switching to apply the change.
+
+  Typical use:
+    # Stuck in slot b after bad OTA? Switch back to a:
+    python androidForge.py --switch-slot a
+    python androidForge.py --reboot
+
+================================================================================
+  9. REBOOT COMMANDS
+================================================================================
+
+--- Reboot to normal Android ---
+  python androidForge.py --reboot normal
+  python androidForge.py --reboot          (defaults to normal)
+
+--- Reboot to Recovery ---
+  python androidForge.py --reboot recovery
+
+--- Reboot to Fastboot / Bootloader ---
+  python androidForge.py --reboot fastboot
+
+--- Stay in Download Agent (DA) mode ---
+  python androidForge.py --reboot download
+
+  After any reboot command the device disconnects immediately.
+  The tool catches the expected USB disconnect and exits cleanly.
+
+================================================================================
+  10. SCATTER FILE COMMANDS
+================================================================================
+
+A scatter file is the firmware map generated by SP Flash Tool.
+It describes partition names, start addresses, sizes, and firmware file names.
+
+--- Parse and display scatter file (no USB, no writes) ---
+  python androidForge.py --scatter scatter_MT6765.txt
+  python androidForge.py --scatter scatter_MT6765.txt --verbose
+
+  Output: formatted table of all entries — partition name, download flag,
+          start address, size, file name.
+
+--- Flash all downloadable entries from scatter file ---
+  python androidForge.py --scatter scatter_MT6765.txt --scatter-flash
+  python androidForge.py --scatter scatter_MT6765.txt --scatter-flash --force
+
+  Rules:
+    - Only entries with is_download=true are flashed
+    - file_name=NONE entries are skipped
+    - Image files must be in the same directory as the scatter file
+    - Protected partitions are skipped automatically
+    - Each flash includes a readback SHA256 verification
+
+================================================================================
+  11. GLOBAL FLAGS  (work with any command)
+================================================================================
+
+  --payload FILE        Use a custom payload binary instead of auto-selection.
+                        Overrides the chipset database lookup.
+                        Example: --payload ./my_mt6765_payload.bin
+
+  --wait-timeout N      How long to wait for BROM device, in seconds.
+                        Default: 60.  Increase if device is slow to appear.
+                        Example: --wait-timeout 120
+
+  --force               Skip all interactive YES/ERASE/WIPE USERDATA prompts.
+                        Use in scripts or when you are sure of the operation.
+                        WARNING: disables all confirmation safeguards.
+
+  --debug               Enable full debug output including stack traces on
+                        errors, USB I/O details, and protocol-level logging.
+
+  --verbose             Enable verbose USB I/O logging — shows every USB read
+                        and write with byte counts and hex preview.
+
+  --out FILE            JSON output file path (used with --device-info).
+
+  --partitions LIST     Comma-separated partition list (used with --dump).
+                        Example: --partitions boot,recovery,vbmeta,dtbo
+
+  --image FILE          Local image path (used with --verify-partition).
+
+  --flash-partition N   Partition name to flash (used with --flash-only
+                        and --dump + flash combo).
+
+  --flash-image FILE    Raw image file to flash. Must NOT be a sparse image.
+                        Convert sparse images first with simg2img.
+
+  --scatter-flash       Activates actual flashing when used with --scatter.
+                        Without this flag, --scatter only displays the table.
+
+================================================================================
+  12. FULL EXAMPLES — REAL-WORLD WORKFLOWS
+================================================================================
+
+--- Scenario A: First time — check everything is working ---
+  python androidForge.py --check-deps
+  python androidForge.py --list-chipsets
+  python androidForge.py --target-config
+  python androidForge.py --list-partitions
+
+--- Scenario B: Full backup before any modification ---
+  python androidForge.py --dump-all
+  # All images saved to:  backup/<chipset>/
+
+--- Scenario C: Root with Magisk ---
+  # Step 1: dump boot partition
+  python androidForge.py --dump --partitions boot
+  # Step 2: patch boot.img with Magisk app on another Android device
+  # Step 3: flash patched image
+  python androidForge.py --flash-only --flash-partition boot \
+    --flash-image magisk_boot.img
+  # Step 4: reboot
+  python androidForge.py --reboot normal
+
+--- Scenario D: Install custom recovery (TWRP / OrangeFox) ---
+  python androidForge.py --dump --partitions recovery
+  python androidForge.py --flash-only --flash-partition recovery \
+    --flash-image twrp.img
+  python androidForge.py --reboot recovery
+
+--- Scenario E: Flash full firmware from scatter file ---
+  python androidForge.py --scatter MT6765_Android12_scatter.txt
+  # Review the table carefully, then:
+  python androidForge.py --scatter MT6765_Android12_scatter.txt \
+    --scatter-flash --force
+
+--- Scenario F: Verify flash was successful ---
+  python androidForge.py --verify-partition boot --image magisk_boot.img
+  # [OK] if device partition matches the file
+  # [ERROR] if mismatch — reflash needed
+
+--- Scenario G: FRP / Factory reset bypass ---
+  python androidForge.py --wipe-userdata
+  # Type: WIPE USERDATA
+  python androidForge.py --reboot normal
+
+--- Scenario H: Fix stuck A/B update (device bootloops in slot b) ---
+  python androidForge.py --slot-info          # confirm active is b
+  python androidForge.py --switch-slot a      # switch to a, type YES
+  python androidForge.py --reboot normal      # boot into good slot
+
+--- Scenario I: Flash firmware directory (batch) ---
+  # Put boot.img, recovery.img, vbmeta.img, dtbo.img in ./firmware/
+  python androidForge.py --batch-flash ./firmware/ --force
+
+--- Scenario J: Export device report for support / reference ---
+  python androidForge.py --device-info --out device_report.json
+  # Includes chipset, security flags, storage, A/B slot, all partitions
+
+--- Scenario L: Check security before choosing payload ---
+  python androidForge.py --target-config
+  # If SLA/DAA disabled  → use your mt<xxxx>_payload.bin
+  # If SLA/DAA enabled   → you need a signed/Kamakiri payload
+
+================================================================================
+  13. TROUBLESHOOTING
+================================================================================
+
+PROBLEM: "pyusb not installed"
+  FIX: pip install pyusb pyserial colorama tqdm
+
+PROBLEM: "No MTK BROM device found after 60s"
+  FIX 1: Make sure the device is FULLY powered off (not just screen off)
+  FIX 2: Hold Vol-Down BEFORE connecting USB, keep holding until detected
+  FIX 3: Try a different USB cable (data cables only, not charge-only)
+  FIX 4: Try a different USB port (USB 2.0 ports are often more reliable)
+  FIX 5: On Linux, run with sudo or add the udev rule (see Installation)
+  FIX 6: On Windows, install MTK USB drivers or use Zadig → WinUSB
+
+PROBLEM: "MTK device detected in Preloader mode (PID=0x2000)"
+  FIX: Device started booting before you connected USB.
+       Disconnect, remove battery (or hold power+vol down 10s), reconnect
+       with Vol-Down held from the start.
+
+PROBLEM: "Payload not found: ./payloads/mt6765_payload.bin"
+  FIX: You need to obtain the payload binary for your chipset.
+       Payload binaries are available from the mtkclient project and
+       community sources. Place them in the payloads/ directory with
+       the exact filename shown (e.g. mt6765_payload.bin).
+  CHECK: python androidForge.py --list-chipsets  (shows payload status)
+
+PROBLEM: "hw_code 0x???? not in database"
+  FIX: Your chipset is not yet in the database.
+       Run: python androidForge.py --target-config --debug
+       Note the hw_code and open a feature request with that value.
+       Workaround: use --payload to specify a compatible binary manually.
+
+PROBLEM: "BROM handshake failed"
+  FIX 1: Wrong USB mode — device not in BROM (see above)
+  FIX 2: USB cable issue — try different cable
+  FIX 3: Run with --debug to see the exact byte exchange
+  FIX 4: Add --verbose to see all USB I/O
+
+PROBLEM: "SLA/DAA detected — standard payload rejected"
+  FIX: Your device has SLA or DAA security enabled (confirmed by
+       --target-config). You need a Kamakiri-class bypass payload.
+       The standard unsigned payloads in the payloads/ directory will
+       not work. Consult the mtkclient community for device-specific
+       signed payloads.
+
+PROBLEM: "Storage init failed for both eMMC and UFS"
+  FIX: Payload executed but could not initialise storage.
+       This usually means the payload binary is wrong for this chipset.
+       Try --payload with a different binary, or check the payload version.
+
+PROBLEM: "FLASH VERIFY FAILED"
+  FIX: The readback SHA256 does not match what was written.
+       This could indicate: bad USB cable, storage write error, or
+       the partition being protected by hardware write-protect.
+       DO NOT reboot. Restore from your backup immediately:
+         python androidForge.py --flash-only --flash-partition boot \
+           --flash-image backup/<chipset>/boot.img
+
+PROBLEM: "Image is an Android sparse image — convert first"
+  FIX: simg2img input.img output_raw.img
+       Then flash output_raw.img
+
+PROBLEM: On Linux/macOS "Permission denied" or "Access denied"
+  FIX: Run with sudo, or add the udev rule (Linux):
+       echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", MODE="0666"' \
+         | sudo tee /etc/udev/rules.d/99-mtk.rules && sudo udevadm control --reload
+
+================================================================================
+  14. SUPPORTED CHIPSETS SUMMARY  (44 chipsets as of v1.2)
+================================================================================
+
+  Run:  python androidForge.py --list-chipsets
+  for the live table including payload binary status.
+
+  32-bit classic:
+    MT6572, MT6580, MT6582, MT6592, MT6595
+
+  64-bit transition (MT67xx):
+    MT6735, MT6737, MT6750, MT6755, MT6757, MT6758, MT6739
+    MT6761, MT6762, MT6763, MT6765, MT6768, MT6769
+    MT6771, MT6779, MT6785, MT6789
+
+  Dimensity 700/800/900:
+    MT6833, MT6835, MT6853, MT6873, MT6875, MT6877, MT6879
+
+  Dimensity 1000/1200:
+    MT6885, MT6889, MT6891, MT6893
+
+  Dimensity 8000/8100/8200:
+    MT6895
+
+  Dimensity 6000:
+    MT6855, MT6886
+
+  Dimensity 9000/9200/9300:
+    MT6983, MT6985, MT6897
+
+  Tablet SoCs (MT81xx):
+    MT8127, MT8163, MT8167, MT8173, MT8183, MT8195, MT8321, MT8765
+
+================================================================================
+  15. DIRECTORY LAYOUT
+================================================================================
+
+  androidForge.py        Main script (single file, no install needed)
+  commands.txt           This file
+  payloads/              Place chipset payload binaries here
+    mt6765_payload.bin   Example — named <chipset_lowercase>_payload.bin
+    mt6771_payload.bin
+    ...
+  backup/                Partition dumps (auto-created)
+    MT6765/
+      boot.img
+      recovery.img
+      backup_manifest.json   SHA256 + metadata for all dumped partitions
+  logs/                  Session logs and JSON exports (auto-created)
+    androidForge_<timestamp>.log
+    device_info_<chipset>_<timestamp>.json
+
+================================================================================
+  PROTECTED PARTITIONS  (never written, even with --force)
+================================================================================
+
+  preloader  preloader_a  preloader_b
+  lk         lk_a         lk_b
+  tee1       tee2         tee_a   tee_b
+  seccfg
+  nvram
+  proinfo
+  pgpt       sgpt
+
+  Attempting to flash or format any of the above will be refused with an
+  error message regardless of flags used.
+
+================================================================================
+  androidForge v1.2  —  Use responsibly. Only on devices you own.
+================================================================================
