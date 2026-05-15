@@ -1,4 +1,4 @@
-# androidForge v1.2.0
+# androidForge
 
 A portable, command-line tool for managing MediaTek (MTK) Android devices via **BROM (Boot ROM)** mode. Supports dumping, flashing, formatting, and managing partitions and device configurations — all at the lowest hardware level, without requiring the device OS to be running.
 
