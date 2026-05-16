@@ -46,7 +46,7 @@ A portable, command-line tool for managing MediaTek (MTK) Android devices via **
 # Clone the repository
 git clone https://github.com/projectgtp/androidForgeofficial.git
 cd androidForgeofficial
-python enc.py
+python androidForge.py
 # Install dependencies
 pip install -r requirements.txt
 ```
